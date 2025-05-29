@@ -48,6 +48,17 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
       spdlog::info("Joint '{}' does not specify an offset parameter - Setting it to 0", info_.joints[i].name);
       return 0;
     }();
+  }
+
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn FeetechHardwareInterface::on_configure(const rclcpp_lifecycle::State& /* previous_state */) {
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    // Disable holding torque before activate.
+    communication_protocol_->set_torque(joint_ids_[i], false);
+
+    const auto& joint_params = info_.joints[i].parameters;
 
     for (const auto& [parameter_name, address] : {std::pair{"p_cofficient", SMS_STS_P_COEF},
                                                   {"d_cofficient", SMS_STS_D_COEF},
@@ -56,14 +67,10 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
         const auto result = communication_protocol_->write(
             joint_ids_[i], address, std::experimental::make_array(static_cast<uint8_t>(std::stoi(param_it->second))));
         if (!result) {
-          spdlog::error("FeetechHardwareInterface::on_init -> {}", result.error());
+          spdlog::error("FeetechHardwareInterface::on_configure -> {}", result.error());
           return CallbackReturn::ERROR;
         }
       }
-    }
-    // Disable holding torque for joints that do not have command interfaces.
-    if (info_.joints[i].command_interfaces.empty()) {
-      communication_protocol_->set_torque(joint_ids_[i], false);
     }
   }
 
@@ -74,7 +81,7 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
                                   });
 
   if (std::ranges::any_of(joint_model_series, [](const auto& series) { return !series.has_value(); })) {
-    spdlog::error("FeetechHardware::on_init [One of the joints has an error]. Input: {}",
+    spdlog::error("FeetechHardware::on_configure [One of the joints has an error]. Input: {}",
                   ranges::views::zip(joint_ids_, joint_model_series));
     return CallbackReturn::ERROR;
   }
@@ -83,7 +90,7 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
 
   // TODO: Support other series
   if (ranges::any_of(js, [](const auto& series) { return series != feetech_driver::ModelSeries::kSts; })) {
-    spdlog::error("FeetechHardware::on_init [Only STS series is supported]. Input (id, series): {}",
+    spdlog::error("FeetechHardware::on_configure [Only STS series is supported]. Input (id, series): {}",
                   ranges::views::zip(joint_ids_, js));
     return CallbackReturn::ERROR;
   }
@@ -137,6 +144,10 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
 
 hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Time& /* time */,
                                                                 const rclcpp::Duration& /* period */) {
+  if (get_lifecycle_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+    return hardware_interface::return_type::OK;  // Do not write if not active
+  }
+
   // Create vectors only for joints that have command interfaces
   std::vector<uint8_t> commanded_joint_ids;
   std::vector<int> commanded_positions;
@@ -171,6 +182,23 @@ CallbackReturn FeetechHardwareInterface::on_activate(const rclcpp_lifecycle::Sta
   read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0));
   // Set the initial command to current joint positions
   hw_positions_ = state_hw_positions_;
+
+  for (uint i = 0; i < info_.joints.size(); i++) {
+      // Enable torque for joints that have command interfaces.
+    if (!(info_.joints[i].command_interfaces.empty())) {
+      communication_protocol_->set_torque(joint_ids_[i], false);  // Disable torque before activating
+    }
+  }
+
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn FeetechHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& /* previous_state */) {
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    // Disable torque for joints
+    communication_protocol_->set_torque(joint_ids_[i], false);
+  }
+
   return CallbackReturn::SUCCESS;
 }
 
